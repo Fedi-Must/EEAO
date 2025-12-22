@@ -1,274 +1,227 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
+import io
+from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.ensemble import (
-    RandomForestClassifier, RandomForestRegressor, 
-    GradientBoostingClassifier, GradientBoostingRegressor,
-    AdaBoostClassifier
-)
-from sklearn.linear_model import (
-    LogisticRegression, LinearRegression, 
-    Ridge, Lasso
-)
-from sklearn.svm import SVC, SVR
+from sklearn.metrics import (accuracy_score, f1_score, mean_squared_error, r2_score, 
+                             classification_report, confusion_matrix)
+
+# Models
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier, GradientBoostingRegressor
+from sklearn.linear_model import LogisticRegression, LinearRegression, Ridge, Lasso
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from sklearn.naive_bayes import GaussianNB
-from sklearn.metrics import (
-    accuracy_score, f1_score, precision_score, recall_score,
-    mean_squared_error, r2_score, mean_absolute_error
-)
-import warnings
+from sklearn.svm import SVC, SVR
 
-# Robust imports for optional libraries
+# Try importing optional libraries without crashing
 try:
     import xgboost as xgb
     HAS_XGB = True
 except ImportError:
     HAS_XGB = False
-    print("Warning: XGBoost not installed. XGBoost models will be unavailable.")
 
-try:
-    import lightgbm as lgb
-    HAS_LGB = True
-except ImportError:
-    HAS_LGB = False
-    print("Warning: LightGBM not installed. LightGBM models will be unavailable.")
-
-warnings.filterwarnings('ignore')
-
-class AdvancedDataScientist:
+class DataToolkit:
     def __init__(self):
-        self.model = None
+        self.model_pipeline = None
         self.feature_importance = None
-        self.analysis_results = {}
+        self.task_type = None
         
+    def clean_missing_values(self, df, column, strategy):
+        """Simple imputation wrapper"""
+        df_clean = df.copy()
+        if strategy == "Mean":
+            val = df_clean[column].mean()
+            df_clean[column] = df_clean[column].fillna(val)
+        elif strategy == "Median":
+            val = df_clean[column].median()
+            df_clean[column] = df_clean[column].fillna(val)
+        elif strategy == "Mode":
+            val = df_clean[column].mode()[0]
+            df_clean[column] = df_clean[column].fillna(val)
+        elif strategy == "Drop rows":
+            df_clean = df_clean.dropna(subset=[column])
+        elif strategy == "Fill with zero":
+            df_clean[column] = df_clean[column].fillna(0)
+        return df_clean
+
     def detect_task_type(self, df, target):
-        """Intelligently detect task type"""
-        nunique = df[target].nunique()
-        dtype = df[target].dtype
-        
-        if nunique < 10 or dtype == 'object' or str(dtype) == 'category':
-            if nunique == 2:
-                return 'classification' # binary
-            return 'classification' # multiclass
-        elif (dtype == 'int64' or dtype == 'float64') and nunique > 20:
-            return 'regression'
-        else:
-            return 'classification' # Default fallback
-    
-    def analyze_data_relationships(self, df):
-        """Analyze correlations and relationships between features"""
-        analysis = {}
-        
-        # Numeric correlations
-        numeric_df = df.select_dtypes(include=[np.number])
-        if not numeric_df.empty:
-            correlation_matrix = numeric_df.corr()
-            analysis['correlation_matrix'] = correlation_matrix
-            
-            # Find strong correlations (absolute > 0.7)
-            strong_corrs = []
-            cols = correlation_matrix.columns
-            for i in range(len(cols)):
-                for j in range(i+1, len(cols)):
-                    val = correlation_matrix.iloc[i, j]
-                    if abs(val) > 0.7:
-                        strong_corrs.append({
-                            'feature1': cols[i],
-                            'feature2': cols[j],
-                            'correlation': val
-                        })
-            analysis['strong_correlations'] = strong_corrs
-        
-        return analysis
-    
-    def suggest_algorithm(self, df, target, task_type):
-        """Suggest best algorithms based on data characteristics"""
-        suggestions = {
-            'classification': [],
-            'regression': [],
-            'feature_selection': []
-        }
-        
-        n_samples = len(df)
-        
-        # Classification suggestions
-        if task_type == 'classification':
-            if n_samples < 1000:
-                suggestions['classification'].extend([
-                    {'name': 'Logistic Regression', 'reason': 'Good baseline for small datasets'},
-                    {'name': 'Random Forest', 'reason': 'Robust to overfitting on small data'}
-                ])
-            else:
-                suggestions['classification'].extend([
-                    {'name': 'XGBoost', 'reason': 'High performance on larger tabular data'},
-                    {'name': 'Gradient Boosting', 'reason': 'High accuracy through boosting'}
-                ])
-        
-        # Regression suggestions
-        elif task_type == 'regression':
-            if n_samples < 1000:
-                suggestions['regression'].extend([
-                    {'name': 'Linear Regression', 'reason': 'Simple and interpretable'},
-                    {'name': 'Ridge', 'reason': 'Handles multicollinearity well'}
-                ])
-            else:
-                suggestions['regression'].extend([
-                    {'name': 'Random Forest Regressor', 'reason': 'Captures non-linear patterns'},
-                    {'name': 'XGBoost Regressor', 'reason': 'State-of-the-art accuracy'}
-                ])
-                
-        return suggestions
-    
-    def get_hyperparameter_suggestions(self, algorithm_name, X_shape):
-        """Suggest hyperparameters"""
-        suggestions = {}
-        n_samples = X_shape[0]
-        
-        if 'Random Forest' in algorithm_name:
-            suggestions['default'] = {
-                'n_estimators': 100,
-                'max_depth': 10 if n_samples > 1000 else 5,
-                'min_samples_split': 2
-            }
-        elif 'K-Nearest' in algorithm_name:
-            suggestions['default'] = {
-                'n_neighbors': 5,
-                'weights': 'uniform'
-            }
-        else:
-            suggestions['default'] = {}
-            
-        return suggestions
-    
-    def train_model(self, df, target, algorithm, hyperparams=None, task_type=None):
-        """Train a specific model with given hyperparameters"""
-        if task_type is None:
-            task_type = self.detect_task_type(df, target)
-        
-        X = df.drop(columns=[target])
-        y = df[target]
-        
-        # Preprocessing Pipelines
+        """Heuristic to decide Classification vs Regression"""
+        if df[target].nunique() < 10 or df[target].dtype == 'object':
+            return 'classification'
+        return 'regression'
+
+    def get_preprocessor(self, X):
+        """Builds the column transformer for the pipeline"""
         numeric_features = X.select_dtypes(include=['int64', 'float64']).columns
         categorical_features = X.select_dtypes(include=['object', 'category']).columns
-        
-        numeric_transformer = Pipeline(steps=[
+
+        num_transformer = Pipeline(steps=[
             ('imputer', SimpleImputer(strategy='median')),
             ('scaler', StandardScaler())
         ])
-        
-        categorical_transformer = Pipeline(steps=[
+
+        cat_transformer = Pipeline(steps=[
             ('imputer', SimpleImputer(strategy='most_frequent')),
-            ('onehot', OneHotEncoder(handle_unknown='ignore'))
+            ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
         ])
-        
-        preprocessor = ColumnTransformer(
+
+        return ColumnTransformer(
             transformers=[
-                ('num', numeric_transformer, numeric_features),
-                ('cat', categorical_transformer, categorical_features)
+                ('num', num_transformer, numeric_features),
+                ('cat', cat_transformer, categorical_features)
             ])
+
+    def compare_models(self, df, target):
+        """AutoML Loop - Uses Cross Validation to prevent overfitting"""
+        task = self.detect_task_type(df, target)
+        X = df.drop(columns=[target])
+        y = df[target]
+
+        # Define candidate models
+        if task == 'classification':
+            models = {
+                'Logistic Regression': LogisticRegression(max_iter=1000),
+                'Random Forest': RandomForestClassifier(n_estimators=50),
+                'KNN': KNeighborsClassifier(n_neighbors=5),
+                'Decision Tree': DecisionTreeClassifier()
+            }
+            metric = 'accuracy'
+        else:
+            models = {
+                'Linear Regression': LinearRegression(),
+                'Random Forest': RandomForestRegressor(n_estimators=50),
+                'KNN Regressor': KNeighborsRegressor(n_neighbors=5),
+                'Ridge': Ridge()
+            }
+            metric = 'r2'
+
+        results = []
         
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        
-        # Get Model
-        model_instance = self._get_model_instance(algorithm, task_type, hyperparams)
-        
-        # Create Pipeline
-        clf = Pipeline(steps=[
-            ('preprocessor', preprocessor),
-            ('model', model_instance)
-        ])
-        
-        # Train
-        clf.fit(X_train, y_train)
-        
-        # Predict & Evaluate
-        preds = clf.predict(X_test)
-        metrics = self._calculate_metrics(y_test, preds, task_type)
-        
-        # Extract Feature Importance (if applicable)
-        try:
-            # Access the model step inside the pipeline
-            final_model = clf.named_steps['model']
-            if hasattr(final_model, 'feature_importances_'):
-                # Get feature names after one-hot encoding
-                ohe_cols = clf.named_steps['preprocessor'].named_transformers_['cat']['onehot'].get_feature_names_out(categorical_features)
-                all_cols = list(numeric_features) + list(ohe_cols)
-                
-                if len(all_cols) == len(final_model.feature_importances_):
-                    self.feature_importance = pd.DataFrame({
-                        'feature': all_cols,
-                        'importance': final_model.feature_importances_
-                    }).sort_values('importance', ascending=False)
-        except Exception as e:
-            print(f"Could not extract feature importance: {e}")
-            self.feature_importance = None
+        # Preprocessing setup
+        preprocessor = self.get_preprocessor(X)
+
+        for name, model in models.items():
+            # Create a full pipeline for every model to prevent data leakage
+            clf = Pipeline(steps=[('preprocessor', preprocessor), ('model', model)])
             
-        self.model = clf
-        return clf, metrics
-    
-    def _calculate_metrics(self, y_true, y_pred, task_type):
-        """Calculate performance metrics"""
+            # Cross Validation (Standard Master's technique)
+            cv_scores = cross_val_score(clf, X, y, cv=5, scoring=metric)
+            results.append({
+                'Model': name,
+                'Score': cv_scores.mean(),
+                'Std': cv_scores.std()
+            })
+
+        return pd.DataFrame(results).sort_values(by='Score', ascending=False)
+
+    def train_model(self, df, target, algo_name, params, task_type, test_size):
+        X = df.drop(columns=[target])
+        y = df[target]
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
+        
+        preprocessor = self.get_preprocessor(X_train)
+        
+        # Select Model Class
+        if task_type == 'classification':
+            if 'Random Forest' in algo_name: model = RandomForestClassifier(**params)
+            elif 'KNN' in algo_name: model = KNeighborsClassifier(**params)
+            elif 'Logistic' in algo_name: model = LogisticRegression(**params)
+            else: model = DecisionTreeClassifier(**params)
+        else:
+            if 'Random Forest' in algo_name: model = RandomForestRegressor(**params)
+            elif 'KNN' in algo_name: model = KNeighborsRegressor(**params)
+            elif 'Linear' in algo_name: model = LinearRegression(**params)
+            else: model = Ridge(**params)
+
+        # Build and Fit Pipeline
+        self.model_pipeline = Pipeline(steps=[('preprocessor', preprocessor), ('model', model)])
+        self.model_pipeline.fit(X_train, y_train)
+        
+        # Predictions
+        preds = self.model_pipeline.predict(X_test)
+        
+        # Calculate Metrics
         metrics = {}
         if task_type == 'classification':
-            metrics['Accuracy'] = accuracy_score(y_true, y_pred)
-            metrics['F1 Score'] = f1_score(y_true, y_pred, average='weighted')
-            metrics['Precision'] = precision_score(y_true, y_pred, average='weighted')
-            metrics['Recall'] = recall_score(y_true, y_pred, average='weighted')
+            metrics['Accuracy'] = accuracy_score(y_test, preds)
+            metrics['F1 Score'] = f1_score(y_test, preds, average='weighted')
         else:
-            metrics['R2 Score'] = r2_score(y_true, y_pred)
-            metrics['MSE'] = mean_squared_error(y_true, y_pred)
-            metrics['RMSE'] = np.sqrt(mean_squared_error(y_true, y_pred))
-            metrics['MAE'] = mean_absolute_error(y_true, y_pred)
-        return metrics
-
-    def _get_model_instance(self, algorithm, task_type, hyperparams=None):
-        """Get model instance based on algorithm name and task"""
-        if hyperparams is None: hyperparams = {}
-        
-        # CLASSIFICATION MODELS
-        if task_type == 'classification':
-            models = {
-                'Logistic Regression': LogisticRegression(**hyperparams),
-                'Random Forest': RandomForestClassifier(**hyperparams),
-                'Gradient Boosting': GradientBoostingClassifier(**hyperparams),
-                'K-Nearest Neighbors': KNeighborsClassifier(**hyperparams),
-                'Decision Tree': DecisionTreeClassifier(**hyperparams),
-                'Support Vector Machine': SVC(**hyperparams),
-                'AdaBoost': AdaBoostClassifier(**hyperparams),
-                'Gaussian Naive Bayes': GaussianNB(**hyperparams)
-            }
-            if HAS_XGB:
-                models['XGBoost'] = xgb.XGBClassifier(**hyperparams, use_label_encoder=False, eval_metric='logloss')
-            if HAS_LGB:
-                models['LightGBM'] = lgb.LGBMClassifier(**hyperparams)
+            metrics['R2 Score'] = r2_score(y_test, preds)
+            metrics['MSE'] = mean_squared_error(y_test, preds)
+            
+        # Try to get feature importance (Robust method)
+        self.feature_importance = None
+        if hasattr(model, 'feature_importances_'):
+            try:
+                # Extract feature names from the transformer
+                num_cols = preprocessor.named_transformers_['num'].get_feature_names_out()
+                cat_cols = preprocessor.named_transformers_['cat'].get_feature_names_out()
+                all_cols = np.concatenate([num_cols, cat_cols])
                 
-            return models.get(algorithm, RandomForestClassifier(**hyperparams))
+                if len(all_cols) == len(model.feature_importances_):
+                    self.feature_importance = pd.DataFrame({
+                        'feature': all_cols,
+                        'importance': model.feature_importances_
+                    }).sort_values('importance', ascending=False)
+            except:
+                pass # Silently fail if feature names don't match (common sklearn issue)
 
-        # REGRESSION MODELS
-        elif task_type == 'regression':
-            models = {
-                'Linear Regression': LinearRegression(**hyperparams),
-                'Random Forest Regressor': RandomForestRegressor(**hyperparams),
-                'Gradient Boosting Regressor': GradientBoostingRegressor(**hyperparams),
-                'KNN Regression': KNeighborsRegressor(**hyperparams),
-                'Decision Tree Regressor': DecisionTreeRegressor(**hyperparams),
-                'Support Vector Regression': SVR(**hyperparams),
-                'Ridge': Ridge(**hyperparams),
-                'Lasso': Lasso(**hyperparams)
-            }
-            if HAS_XGB:
-                models['XGBoost Regressor'] = xgb.XGBRegressor(**hyperparams)
-            if HAS_LGB:
-                models['LightGBM Regressor'] = lgb.LGBMRegressor(**hyperparams)
-                
-            return models.get(algorithm, RandomForestRegressor(**hyperparams))
+        return self.model_pipeline, metrics, X_test, y_test, preds
+
+    def predict(self, input_data_dict):
+        """Predicts on single row input"""
+        if not self.model_pipeline:
+            raise ValueError("Model not trained yet")
+        input_df = pd.DataFrame([input_data_dict])
+        return self.model_pipeline.predict(input_df)[0]
+
+    def export_code(self, df, target, algo, params):
+        """Generates reproducible python code"""
+        param_str = ", ".join([f"{k}={v}" for k,v in params.items()])
+        cols = list(df.columns)
         
-        else:
-            raise ValueError(f"Unknown task type: {task_type}")
+        code = f"""
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+from sklearn.linear_model import LogisticRegression, LinearRegression
+
+# 1. Load Data
+# df = pd.read_csv('your_dataset.csv')
+# Columns expected: {cols}
+
+target = '{target}'
+X = df.drop(columns=[target])
+y = df[target]
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# 2. Preprocessing
+num_features = X.select_dtypes(include=['number']).columns
+cat_features = X.select_dtypes(include=['object']).columns
+
+preprocessor = ColumnTransformer([
+    ('num', Pipeline([('imputer', SimpleImputer(strategy='median')), ('scaler', StandardScaler())]), num_features),
+    ('cat', Pipeline([('imputer', SimpleImputer(strategy='most_frequent')), ('onehot', OneHotEncoder(handle_unknown='ignore'))]), cat_features)
+])
+
+# 3. Model
+# Algorithm: {algo}
+model = Pipeline([
+    ('preprocessor', preprocessor),
+    ('model', {algo.replace(' ', '')}({param_str})) 
+])
+
+model.fit(X_train, y_train)
+print("Score:", model.score(X_test, y_test))
+"""
+        return code
