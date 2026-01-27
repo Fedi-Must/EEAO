@@ -1,3 +1,7 @@
 venv/
 __pycache__/
 *.pyc
+.toolkit_*.csv
+.toolkit_*.json
+model.joblib
+.streamlit/secrets.toml

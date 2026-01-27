@@ -1,8 +1,0 @@
-{
-  "remember": true,
-  "gemini_key": "",
-  "x_axis": "PassengerId",
-  "y_axis": "Survived",
-  "plot_type": "Bar",
-  "target": "PassengerId"
-}
