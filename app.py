@@ -1,8 +1,13 @@
 import json, time
+import io
+import textwrap
+import traceback
+from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
 
 try:
@@ -10,6 +15,12 @@ try:
     HAS_GEMINI = True
 except Exception:
     HAS_GEMINI = False
+
+try:
+    from streamlit_ace import st_ace  # type: ignore
+    HAS_ACE = True
+except Exception:
+    HAS_ACE = False
 
 from logic import DataToolkit
 
@@ -20,6 +31,40 @@ RAW_PATH = APP_DIR / ".toolkit_raw.csv"
 CUR_PATH = APP_DIR / ".toolkit_current.csv"
 MODEL_PATH = APP_DIR / "model.joblib"
 MAX_HISTORY = 12
+
+CODE_TEMPLATES = {
+    "Quick summary": textwrap.dedent(
+        """\
+        # df is the current dataset (pandas DataFrame)
+        # Set result = ... to display it below
+        result = df.describe(include="all")
+        """
+    ).strip(),
+    "Value counts (first column)": textwrap.dedent(
+        """\
+        col = df.columns[0]
+        result = df[col].astype(str).value_counts().head(10)
+        """
+    ).strip(),
+    "Correlation heatmap (numeric)": textwrap.dedent(
+        """\
+        num = df.select_dtypes(include="number")
+        if num.shape[1] >= 2:
+            fig = px.imshow(num.corr(numeric_only=True), text_auto=True)
+        else:
+            result = "Need at least 2 numeric columns."
+        """
+    ).strip(),
+    "Transform + replace dataset": textwrap.dedent(
+        """\
+        # Create a new DataFrame and assign it to new_df to apply
+        new_df = df.copy()
+        # Example: drop duplicates
+        new_df = new_df.drop_duplicates()
+        """
+    ).strip(),
+}
+DEFAULT_CODE = CODE_TEMPLATES["Quick summary"]
 
 
 def rr():
@@ -105,6 +150,10 @@ if "plot_type" not in st.session_state:
     st.session_state.plot_type = "Scatter"
 if "target" not in st.session_state:
     st.session_state.target = None
+if "code_template" not in st.session_state:
+    st.session_state.code_template = "Quick summary"
+if "code_snippet" not in st.session_state:
+    st.session_state.code_snippet = DEFAULT_CODE
 
 if "persist_loaded" not in st.session_state:
     st.session_state.persist_loaded = True
@@ -133,114 +182,119 @@ st.markdown('<div class="small-muted">Explore ➜ Clean ➜ Engineer ➜ Train �
 
 with st.sidebar:
     st.header("Project Setup")
-    st.session_state.remember = st.checkbox("Remember locally", value=st.session_state.remember)
-    st.session_state.gemini_key = st.text_input(
-        "Gemini API Key (Optional)",
-        type="password",
-        value=st.session_state.gemini_key if st.session_state.remember else "",
-    )
+    with st.expander("Account & keys", expanded=True):
+        st.session_state.remember = st.checkbox("Remember locally", value=st.session_state.remember)
+        st.session_state.gemini_key = st.text_input(
+            "Gemini API Key (Optional)",
+            type="password",
+            value=st.session_state.gemini_key if st.session_state.remember else "",
+        )
 
-    up = st.file_uploader("Upload Dataset (CSV/Excel)", type=["csv", "xlsx"])
+    with st.expander("Data", expanded=True):
+        up = st.file_uploader("Upload Dataset (CSV/Excel)", type=["csv", "xlsx"])
 
-    if up is not None:
-        sig = (up.name, getattr(up, "size", None))
-        if st.session_state.uploaded_sig != sig:
-            try:
-                df0 = safe_read(up)
-                st.session_state.data = df0
-                st.session_state.raw = df0.copy()
-                st.session_state.base_stats = stats(df0)
-                st.session_state.uploaded_sig = sig
-                st.session_state.hist = []
-                st.session_state.steps = [f"Loaded dataset: {up.name}"]
-
-                cols = df0.columns.tolist()
-                st.session_state.x_axis = cols[0] if cols else None
-                st.session_state.y_axis = cols[1] if len(cols) > 1 else (cols[0] if cols else None)
-
-                st.success("Loaded ✅")
-            except Exception as e:
-                st.error(f"Load error: {e}")
-
-    st.divider()
-    st.subheader("Progress")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Save"):
-            if st.session_state.data is None:
-                st.warning("Nothing to save.")
-            else:
+        if up is not None:
+            sig = (up.name, getattr(up, "size", None))
+            if st.session_state.uploaded_sig != sig:
                 try:
-                    if st.session_state.raw is not None:
-                        st.session_state.raw.to_csv(RAW_PATH, index=False)
-                    st.session_state.data.to_csv(CUR_PATH, index=False)
-                    save_state({
-                        "remember": st.session_state.remember,
-                        "gemini_key": st.session_state.gemini_key if st.session_state.remember else "",
-                        "x_axis": st.session_state.x_axis,
-                        "y_axis": st.session_state.y_axis,
-                        "plot_type": st.session_state.plot_type,
-                        "target": st.session_state.target,
-                    })
-                    st.success("Saved ✅")
-                except Exception as e:
-                    st.error(f"Save failed: {e}")
-
-    with c2:
-        if st.button("Load"):
-            try:
-                if CUR_PATH.exists():
-                    df1 = pd.read_csv(CUR_PATH)
-                    st.session_state.data = df1
-                    st.session_state.base_stats = stats(df1)
+                    df0 = safe_read(up)
+                    st.session_state.data = df0
+                    st.session_state.raw = df0.copy()
+                    st.session_state.base_stats = stats(df0)
+                    st.session_state.uploaded_sig = sig
                     st.session_state.hist = []
-                    st.session_state.steps = ["Loaded saved progress"]
-                    st.session_state.raw = pd.read_csv(RAW_PATH) if RAW_PATH.exists() else df1.copy()
+                    st.session_state.steps = [f"Loaded dataset: {up.name}"]
 
-                    cols = df1.columns.tolist()
-                    if cols:
-                        if st.session_state.x_axis not in cols:
-                            st.session_state.x_axis = cols[0]
-                        if st.session_state.y_axis not in cols:
-                            st.session_state.y_axis = cols[1] if len(cols) > 1 else cols[0]
+                    cols = df0.columns.tolist()
+                    st.session_state.x_axis = cols[0] if cols else None
+                    st.session_state.y_axis = cols[1] if len(cols) > 1 else (cols[0] if cols else None)
+
                     st.success("Loaded ✅")
-                    rr()
+                except Exception as e:
+                    st.error(f"Load error: {e}")
+
+    with st.expander("Persistence", expanded=False):
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Save"):
+                if st.session_state.data is None:
+                    st.warning("Nothing to save.")
                 else:
-                    st.warning("No saved progress found.")
-            except Exception as e:
-                st.error(f"Load failed: {e}")
+                    try:
+                        if st.session_state.raw is not None:
+                            st.session_state.raw.to_csv(RAW_PATH, index=False)
+                        st.session_state.data.to_csv(CUR_PATH, index=False)
+                        save_state({
+                            "remember": st.session_state.remember,
+                            "gemini_key": st.session_state.gemini_key if st.session_state.remember else "",
+                            "x_axis": st.session_state.x_axis,
+                            "y_axis": st.session_state.y_axis,
+                            "plot_type": st.session_state.plot_type,
+                            "target": st.session_state.target,
+                        })
+                        st.success("Saved ✅")
+                    except Exception as e:
+                        st.error(f"Save failed: {e}")
 
-    if st.session_state.raw is not None:
-        if st.button("Reset to Upload"):
-            st.session_state.data = st.session_state.raw.copy()
-            st.session_state.hist = []
-            st.session_state.steps = ["Reset to original upload"]
-            st.success("Reset ✅")
-            rr()
+        with c2:
+            if st.button("Load"):
+                try:
+                    if CUR_PATH.exists():
+                        df1 = pd.read_csv(CUR_PATH)
+                        st.session_state.data = df1
+                        st.session_state.base_stats = stats(df1)
+                        st.session_state.hist = []
+                        st.session_state.steps = ["Loaded saved progress"]
+                        st.session_state.raw = pd.read_csv(RAW_PATH) if RAW_PATH.exists() else df1.copy()
 
-    st.divider()
-    st.subheader("Model")
-    m1, m2 = st.columns(2)
-    with m1:
-        if st.button("Save model.joblib"):
-            try:
-                if st.session_state.tk.model_pipeline is None:
-                    st.warning("Train a model first.")
-                else:
-                    st.session_state.tk.save_model(MODEL_PATH, meta={"target": st.session_state.target})
-                    st.success("Saved model.joblib ✅")
-            except Exception as e:
-                st.error(f"Save model failed: {e}")
+                        cols = df1.columns.tolist()
+                        if cols:
+                            if st.session_state.x_axis not in cols:
+                                st.session_state.x_axis = cols[0]
+                            if st.session_state.y_axis not in cols:
+                                st.session_state.y_axis = cols[1] if len(cols) > 1 else cols[0]
+                        st.success("Loaded ✅")
+                        rr()
+                    else:
+                        st.warning("No saved progress found.")
+                except Exception as e:
+                    st.error(f"Load failed: {e}")
 
-    with m2:
-        model_up = st.file_uploader("Load .joblib", type=["joblib"], label_visibility="collapsed")
-        if model_up is not None:
-            try:
-                st.session_state.tk.load_model(model_up)
-                st.success("Model loaded ✅")
-            except Exception as e:
-                st.error(f"Load model failed: {e}")
+        if st.session_state.raw is not None:
+            if st.button("Reset to Upload"):
+                st.session_state.data = st.session_state.raw.copy()
+                st.session_state.hist = []
+                st.session_state.steps = ["Reset to original upload"]
+                st.success("Reset ✅")
+                rr()
+
+    with st.expander("Model I/O", expanded=False):
+        m1, m2 = st.columns(2)
+        with m1:
+            if st.button("Save model.joblib"):
+                try:
+                    if st.session_state.tk.model_pipeline is None:
+                        st.warning("Train a model first.")
+                    else:
+                        st.session_state.tk.save_model(MODEL_PATH, meta={"target": st.session_state.target})
+                        st.success("Saved model.joblib ✅")
+                except Exception as e:
+                    st.error(f"Save model failed: {e}")
+
+        with m2:
+            model_up = st.file_uploader("Load .joblib", type=["joblib"])
+            if model_up is not None:
+                try:
+                    st.session_state.tk.load_model(model_up)
+                    st.success("Model loaded ✅")
+                except Exception as e:
+                    st.error(f"Load model failed: {e}")
+
+    with st.expander("Steps log", expanded=False):
+        if st.session_state.steps:
+            st.markdown("\n".join([f"- {x}" for x in st.session_state.steps[-10:]]))
+        else:
+            st.caption("No steps yet.")
 
     if st.session_state.remember:
         save_state({
@@ -269,76 +323,79 @@ b.metric("Columns", cur["cols"], delta=cur["cols"] - base["cols"])
 c.metric("Missing", cur["missing"], delta=cur["missing"] - base["missing"])
 d.metric("Duplicates", cur["duplicates"], delta=cur["duplicates"] - base["duplicates"])
 
-t1, t2, t3, t4, t5, t6 = st.tabs(["Overview", "Clean + Engineer", "Model", "Predict", "Report", "AI Help"])
+t1, t2, t3, t4, t5, t6, t7 = st.tabs(
+    ["Overview", "Clean + Engineer", "Model", "Predict", "Report", "Code Lab", "AI Help"]
+)
 
 
 with t1:
-    st.subheader("Preview")
+    left, right = st.columns([1.15, 1])
 
-    q = st.text_input("Search columns", value="")
-    cols = [x for x in df.columns if q.lower() in str(x).lower()] if q else df.columns.tolist()
-    st.caption(f"Columns shown: {len(cols)} / {df.shape[1]}")
-    st.dataframe(df[cols].head(25), use_container_width=True)
+    with left:
+        st.subheader("Data explorer")
 
-    st.divider()
-    st.subheader("Quick filter")
+        with st.expander("Preview", expanded=True):
+            q = st.text_input("Search columns", value="")
+            cols = [x for x in df.columns if q.lower() in str(x).lower()] if q else df.columns.tolist()
+            st.caption(f"Columns shown: {len(cols)} / {df.shape[1]}")
+            st.dataframe(df[cols].head(25), use_container_width=True)
 
-    fcol = st.selectbox("Filter column", df.columns, key="filter_col")
-    if pd.api.types.is_numeric_dtype(df[fcol]):
-        mn, mx = float(df[fcol].min()), float(df[fcol].max())
-        lo, hi = st.slider("Range", mn, mx, (mn, mx))
-        view = df[(df[fcol] >= lo) & (df[fcol] <= hi)]
-    else:
-        txt = st.text_input("Contains", value="")
-        view = df[df[fcol].astype(str).str.contains(txt, case=False, na=False)] if txt else df
+        with st.expander("Quick filter", expanded=False):
+            fcol = st.selectbox("Filter column", df.columns, key="filter_col")
+            if pd.api.types.is_numeric_dtype(df[fcol]):
+                mn, mx = float(df[fcol].min()), float(df[fcol].max())
+                lo, hi = st.slider("Range", mn, mx, (mn, mx))
+                view = df[(df[fcol] >= lo) & (df[fcol] <= hi)]
+            else:
+                txt = st.text_input("Contains", value="")
+                view = df[df[fcol].astype(str).str.contains(txt, case=False, na=False)] if txt else df
 
-    st.dataframe(view.head(25), use_container_width=True)
+            st.dataframe(view.head(25), use_container_width=True)
 
-    st.divider()
-    st.subheader("Visualization")
+    with right:
+        st.subheader("Visualization")
 
-    if st.session_state.x_axis not in df.columns:
-        st.session_state.x_axis = df.columns[0]
-    if st.session_state.y_axis not in df.columns:
-        st.session_state.y_axis = df.columns[1] if len(df.columns) > 1 else df.columns[0]
+        with st.expander("Plot builder", expanded=True):
+            if st.session_state.x_axis not in df.columns:
+                st.session_state.x_axis = df.columns[0]
+            if st.session_state.y_axis not in df.columns:
+                st.session_state.y_axis = df.columns[1] if len(df.columns) > 1 else df.columns[0]
 
-    s1, _ = st.columns([1, 3])
-    with s1:
-        if st.button("Swap X ↔ Y"):
-            st.session_state.x_axis, st.session_state.y_axis = st.session_state.y_axis, st.session_state.x_axis
-            rr()
+            s1, _ = st.columns([1, 3])
+            with s1:
+                if st.button("Swap X ↔ Y"):
+                    st.session_state.x_axis, st.session_state.y_axis = st.session_state.y_axis, st.session_state.x_axis
+                    rr()
 
-    x = st.selectbox("X", df.columns, key="x_axis")
-    y = st.selectbox("Y", df.columns, key="y_axis")
-    k = st.selectbox("Type", ["Scatter", "Box", "Bar", "Histogram"], key="plot_type")
+            x = st.selectbox("X", df.columns, key="x_axis")
+            y = st.selectbox("Y", df.columns, key="y_axis")
+            k = st.selectbox("Type", ["Scatter", "Box", "Bar", "Histogram"], key="plot_type")
 
-    try:
-        if k == "Scatter":
-            fig = px.scatter(df, x=x, y=y)
-        elif k == "Box":
-            fig = px.box(df, x=x, y=y)
-        elif k == "Histogram":
-            fig = px.histogram(df, x=x)
-        else:
-            fig = px.bar(df, x=x, y=y)
-        st.plotly_chart(fig, use_container_width=True)
-    except Exception as e:
-        st.warning(f"Plot error: {e}")
+            try:
+                if k == "Scatter":
+                    fig = px.scatter(df, x=x, y=y)
+                elif k == "Box":
+                    fig = px.box(df, x=x, y=y)
+                elif k == "Histogram":
+                    fig = px.histogram(df, x=x)
+                else:
+                    fig = px.bar(df, x=x, y=y)
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Plot error: {e}")
 
-    st.divider()
-    st.subheader("Suggested plots")
-
-    if st.button("Suggest 3 plots"):
-        figs = st.session_state.tk.suggest_plots(df, target=st.session_state.target, max_plots=3)
-        if not figs:
-            st.info("Not enough numeric columns for suggestions.")
-        else:
-            for f in figs:
-                st.plotly_chart(f, use_container_width=True)
+        with st.expander("Suggested plots", expanded=False):
+            if st.button("Suggest 3 plots"):
+                figs = st.session_state.tk.suggest_plots(df, target=st.session_state.target, max_plots=3)
+                if not figs:
+                    st.info("Not enough numeric columns for suggestions.")
+                else:
+                    for f in figs:
+                        st.plotly_chart(f, use_container_width=True)
 
 
 with t2:
-    st.subheader("Undo")
+    st.subheader("Change history")
     u1, _ = st.columns([1, 3])
     with u1:
         if st.button("Undo last step"):
@@ -350,125 +407,116 @@ with t2:
             else:
                 st.info("Nothing to undo.")
 
-    st.divider()
-    st.subheader("Missing + duplicates")
+    with st.expander("Missing values + duplicates", expanded=True):
+        col = st.selectbox("Column", df.columns, key="clean_col")
 
-    col = st.selectbox("Column", df.columns, key="clean_col")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            strat = st.selectbox("Fill strategy", ["Auto (Median/Mode)", "Mean", "Median", "Mode", "Zero", "Unknown"], key="fill_strat")
+            if st.button("Apply fill"):
+                try:
+                    push_hist()
+                    st.session_state.data = st.session_state.tk.fill_missing(df, col, strat)
+                    log_step(f"Fill missing: {col} ({strat})")
+                    st.success("Done ✅")
+                    rr()
+                except Exception as e:
+                    st.error(f"Fill error: {e}")
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        strat = st.selectbox("Fill strategy", ["Auto (Median/Mode)", "Mean", "Median", "Mode", "Zero", "Unknown"], key="fill_strat")
-        if st.button("Apply fill"):
+        with c2:
+            if st.button("Drop rows with missing"):
+                try:
+                    push_hist()
+                    st.session_state.data = st.session_state.tk.drop_missing_rows(df, col)
+                    log_step(f"Drop rows missing: {col}")
+                    st.success("Done ✅")
+                    rr()
+                except Exception as e:
+                    st.error(f"Drop error: {e}")
+
+        with c3:
+            if st.button("Drop duplicates"):
+                try:
+                    push_hist()
+                    before = len(df)
+                    st.session_state.data = df.drop_duplicates()
+                    log_step(f"Drop duplicates: removed {before - len(st.session_state.data)}")
+                    st.success("Done ✅")
+                    rr()
+                except Exception as e:
+                    st.error(f"Dup error: {e}")
+
+    with st.expander("Columns", expanded=False):
+        dcols = st.multiselect("Drop columns", df.columns, default=[])
+        if st.button("Drop selected columns"):
             try:
-                push_hist()
-                st.session_state.data = st.session_state.tk.fill_missing(df, col, strat)
-                log_step(f"Fill missing: {col} ({strat})")
-                st.success("Done ✅")
-                rr()
-            except Exception as e:
-                st.error(f"Fill error: {e}")
-
-    with c2:
-        if st.button("Drop rows with missing"):
-            try:
-                push_hist()
-                st.session_state.data = st.session_state.tk.drop_missing_rows(df, col)
-                log_step(f"Drop rows missing: {col}")
-                st.success("Done ✅")
-                rr()
-            except Exception as e:
-                st.error(f"Drop error: {e}")
-
-    with c3:
-        if st.button("Drop duplicates"):
-            try:
-                push_hist()
-                before = len(df)
-                st.session_state.data = df.drop_duplicates()
-                log_step(f"Drop duplicates: removed {before - len(st.session_state.data)}")
-                st.success("Done ✅")
-                rr()
-            except Exception as e:
-                st.error(f"Dup error: {e}")
-
-    st.divider()
-    st.subheader("Columns")
-
-    dcols = st.multiselect("Drop columns", df.columns, default=[])
-    if st.button("Drop selected columns"):
-        try:
-            if not dcols:
-                st.warning("Select columns first.")
-            else:
-                push_hist()
-                st.session_state.data = st.session_state.tk.drop_columns(df, dcols)
-                log_step(f"Drop columns: {dcols}")
-                st.success("Done ✅")
-                rr()
-        except Exception as e:
-            st.error(f"Drop cols error: {e}")
-
-    r1, r2, r3 = st.columns(3)
-    with r1:
-        old = st.selectbox("Rename column", df.columns, key="rename_old")
-    with r2:
-        new = st.text_input("New name", value=str(old), key="rename_new")
-    with r3:
-        if st.button("Rename"):
-            try:
-                if not new.strip():
-                    st.error("New name cannot be empty.")
+                if not dcols:
+                    st.warning("Select columns first.")
                 else:
                     push_hist()
-                    st.session_state.data = st.session_state.tk.rename_column(df, old, new.strip())
-                    log_step(f"Rename: {old} -> {new.strip()}")
+                    st.session_state.data = st.session_state.tk.drop_columns(df, dcols)
+                    log_step(f"Drop columns: {dcols}")
                     st.success("Done ✅")
                     rr()
             except Exception as e:
-                st.error(f"Rename error: {e}")
+                st.error(f"Drop cols error: {e}")
 
-    st.divider()
-    st.subheader("Outliers (IQR clip)")
+        r1, r2, r3 = st.columns(3)
+        with r1:
+            old = st.selectbox("Rename column", df.columns, key="rename_old")
+        with r2:
+            new = st.text_input("New name", value=str(old), key="rename_new")
+        with r3:
+            if st.button("Rename"):
+                try:
+                    if not new.strip():
+                        st.error("New name cannot be empty.")
+                    else:
+                        push_hist()
+                        st.session_state.data = st.session_state.tk.rename_column(df, old, new.strip())
+                        log_step(f"Rename: {old} -> {new.strip()}")
+                        st.success("Done ✅")
+                        rr()
+                except Exception as e:
+                    st.error(f"Rename error: {e}")
 
-    num_cols = df.select_dtypes(include=["number"]).columns.tolist()
-    if not num_cols:
-        st.info("No numeric columns found.")
-    else:
-        oc = st.selectbox("Numeric column", num_cols, key="out_col")
-        fac = st.slider("IQR factor", 0.5, 3.0, 1.5, 0.1)
-        if st.button("Clip outliers"):
+    with st.expander("Outliers (IQR clip)", expanded=False):
+        num_cols = df.select_dtypes(include=["number"]).columns.tolist()
+        if not num_cols:
+            st.info("No numeric columns found.")
+        else:
+            oc = st.selectbox("Numeric column", num_cols, key="out_col")
+            fac = st.slider("IQR factor", 0.5, 3.0, 1.5, 0.1)
+            if st.button("Clip outliers"):
+                try:
+                    push_hist()
+                    st.session_state.data = st.session_state.tk.clip_outliers_iqr(df, oc, factor=float(fac))
+                    log_step(f"Clip outliers: {oc} (factor={fac})")
+                    st.success("Done ✅")
+                    rr()
+                except Exception as e:
+                    st.error(f"Outlier error: {e}")
+
+    with st.expander("Feature engineering (presence flag)", expanded=False):
+        src = st.selectbox("Source column", df.columns, key="feat_src")
+        default = f"Has{str(src).replace(' ', '')}"
+        newc = st.text_input("New column", value=default, key="feat_new")
+        if st.button("Create 0/1 presence feature"):
             try:
                 push_hist()
-                st.session_state.data = st.session_state.tk.clip_outliers_iqr(df, oc, factor=float(fac))
-                log_step(f"Clip outliers: {oc} (factor={fac})")
+                st.session_state.data = st.session_state.tk.add_presence_flag(df, src, newc.strip())
+                log_step(f"Presence flag: {src} -> {newc.strip()}")
                 st.success("Done ✅")
                 rr()
             except Exception as e:
-                st.error(f"Outlier error: {e}")
+                st.error(f"Feature error: {e}")
 
-    st.divider()
-    st.subheader("Feature engineering (presence flag)")
-
-    src = st.selectbox("Source column", df.columns, key="feat_src")
-    default = f"Has{str(src).replace(' ', '')}"
-    newc = st.text_input("New column", value=default, key="feat_new")
-    if st.button("Create 0/1 presence feature"):
-        try:
-            push_hist()
-            st.session_state.data = st.session_state.tk.add_presence_flag(df, src, newc.strip())
-            log_step(f"Presence flag: {src} -> {newc.strip()}")
-            st.success("Done ✅")
-            rr()
-        except Exception as e:
-            st.error(f"Feature error: {e}")
-
-    st.divider()
-    st.subheader("Current preview")
-    st.dataframe(st.session_state.data.head(25), use_container_width=True)
+    with st.expander("Current preview", expanded=True):
+        st.dataframe(st.session_state.data.head(25), use_container_width=True)
 
 
 with t3:
-    st.subheader("AutoML + training")
+    st.subheader("Target + task")
 
     target = st.selectbox("Target", df.columns, key="target_sel")
     st.session_state.target = target
@@ -480,9 +528,9 @@ with t3:
         st.error(f"Target error: {e}")
         st.stop()
 
-    mode = st.radio("Mode", ["Compare models", "Train one model"], horizontal=True)
+    m1, m2 = st.tabs(["Compare models", "Train one model"])
 
-    if mode == "Compare models":
+    with m1:
         if st.button("Run tournament"):
             try:
                 with st.spinner("Cross-validation..."):
@@ -494,7 +542,7 @@ with t3:
             except Exception as e:
                 st.error(f"AutoML error: {e}")
 
-    else:
+    with m2:
         algo = st.selectbox("Algorithm", ["Random Forest", "KNN", "Linear/Logistic Regression", "Decision Tree"])
         params = {}
         if "Random Forest" in algo:
@@ -578,6 +626,111 @@ with t5:
 
 
 with t6:
+    st.subheader("Code Lab")
+    st.caption("Run custom Python against your current dataset. Use result, fig, or new_df.")
+
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        template = st.selectbox("Starter templates", list(CODE_TEMPLATES.keys()), key="code_template")
+    with c2:
+        if st.button("Load template"):
+            st.session_state.code_snippet = CODE_TEMPLATES[template]
+            rr()
+
+    if HAS_ACE:
+        code = st_ace(
+            value=st.session_state.code_snippet,
+            language="python",
+            theme="monokai",
+            keybinding="vscode",
+            font_size=14,
+            tab_size=4,
+            show_gutter=True,
+            show_print_margin=False,
+            wrap=False,
+            min_lines=16,
+            height=300,
+            auto_update=False,
+        )
+        if code is not None:
+            st.session_state.code_snippet = code
+    else:
+        st.text_area("Python code", key="code_snippet", height=260)
+        st.caption("Install the IDE editor: pip install streamlit-ace")
+
+    st.caption("Available objects: df (copy), raw_df, pd, np, px, tk. Set result or fig for output; set new_df to apply changes.")
+
+    run_c1, run_c2, _ = st.columns([1, 1, 3])
+    run = False
+    with run_c1:
+        run = st.button("Run code")
+    with run_c2:
+        if st.button("Reset code"):
+            st.session_state.code_snippet = DEFAULT_CODE
+            rr()
+
+    if run:
+        code = st.session_state.code_snippet
+        if not code.strip():
+            st.warning("Write some code to run.")
+        else:
+            env = {
+                "__builtins__": __builtins__,
+                "df": df.copy(),
+                "raw_df": st.session_state.raw,
+                "pd": pd,
+                "np": np,
+                "px": px,
+                "tk": st.session_state.tk,
+            }
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            try:
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    exec(code, env, env)
+            except Exception:
+                st.error("Code error")
+                st.code(traceback.format_exc(), language="text")
+            else:
+                out_text = stdout.getvalue().strip()
+                err_text = stderr.getvalue().strip()
+
+                if out_text:
+                    st.text_area("Output", out_text, height=160)
+                if err_text:
+                    st.text_area("Errors", err_text, height=160)
+
+                result_obj = env.get("result", env.get("output"))
+                if result_obj is not None:
+                    if isinstance(result_obj, pd.DataFrame):
+                        st.dataframe(result_obj, use_container_width=True)
+                    elif isinstance(result_obj, pd.Series):
+                        st.dataframe(result_obj.to_frame(), use_container_width=True)
+                    else:
+                        st.write(result_obj)
+
+                fig_obj = env.get("fig")
+                if fig_obj is not None:
+                    st.plotly_chart(fig_obj, use_container_width=True)
+
+                new_df = env.get("new_df")
+                if isinstance(new_df, pd.DataFrame):
+                    st.subheader("new_df preview")
+                    st.dataframe(new_df.head(25), use_container_width=True)
+                    if st.button("Apply new_df to dataset"):
+                        push_hist()
+                        st.session_state.data = new_df
+                        log_step("Custom code: applied new_df")
+                        st.success("Applied ✅")
+                        rr()
+                elif "new_df" in env:
+                    st.warning("new_df exists but is not a pandas DataFrame.")
+
+                if not out_text and not err_text and result_obj is None and fig_obj is None and "new_df" not in env:
+                    st.info("No output yet. Use print(), set result, or set fig.")
+
+
+with t7:
     st.subheader("AI Help (Optional)")
     st.caption("Model: gemini-2.5-flash")
 
