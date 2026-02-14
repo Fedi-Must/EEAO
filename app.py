@@ -1,5 +1,6 @@
 import io
 import json
+import hashlib
 import textwrap
 import traceback
 from contextlib import redirect_stderr, redirect_stdout
@@ -111,6 +112,7 @@ def session_defaults() -> Dict[str, Any]:
         "autosave_enabled": True,
         "dataset_upload_nonce": 0,
         "model_upload_nonce": 0,
+        "model_uploaded_sig": None,
         "ai_model_name": DEFAULT_GEMINI_MODEL,
         "ai_chat_messages": [],
         "ai_chat_history": [],
@@ -487,6 +489,9 @@ def render_theme_bridge() -> None:
 def persist_progress() -> None:
     """Persist current workspace data and metadata when remember mode is enabled."""
     state = st.session_state
+    if not bool(state.get("remember", True)):
+        clear_saved_dataset_files()
+        return
     if state.data is None:
         return
     try:
@@ -498,14 +503,33 @@ def persist_progress() -> None:
         pass
 
 
-def handle_uploaded_dataset(uploaded_file: Any, source_label: str = "upload") -> None:
+def uploaded_file_signature(uploaded_file: Any) -> tuple:
+    """Build a stable upload signature using name, size, and content digest."""
+    name = str(getattr(uploaded_file, "name", ""))
+    size = getattr(uploaded_file, "size", None)
+    digest = ""
+    try:
+        if hasattr(uploaded_file, "getvalue"):
+            payload = uploaded_file.getvalue()
+        else:
+            current_pos = uploaded_file.tell() if hasattr(uploaded_file, "tell") else None
+            payload = uploaded_file.read()
+            if current_pos is not None and hasattr(uploaded_file, "seek"):
+                uploaded_file.seek(current_pos)
+        digest = hashlib.sha256(payload).hexdigest()
+    except Exception:
+        digest = ""
+    return (name, size, digest)
+
+
+def handle_uploaded_dataset(uploaded_file: Any, source_label: str = "upload") -> bool:
     """Load an uploaded dataset and reset dependent state for a fresh workflow."""
     if uploaded_file is None:
-        return
+        return False
 
-    signature = (uploaded_file.name, getattr(uploaded_file, "size", None))
+    signature = uploaded_file_signature(uploaded_file)
     if st.session_state.uploaded_sig == signature:
-        return
+        return False
 
     uploaded_df = safe_read(uploaded_file)
     set_dataset_state(
@@ -516,10 +540,13 @@ def handle_uploaded_dataset(uploaded_file: Any, source_label: str = "upload") ->
     )
     st.session_state.uploaded_sig = signature
     persist_progress()
+    return True
 
 
 def restore_progress_if_available() -> bool:
     """Attempt to restore remembered workspace progress on startup."""
+    if not bool(st.session_state.get("remember", True)):
+        return False
     if st.session_state.data is not None:
         return True
     try:
@@ -532,6 +559,10 @@ def restore_progress_if_available() -> bool:
 
 def safe_read(file_obj: Any) -> pd.DataFrame:
     """Read CSV/XLSX uploads with parsing fallbacks and strict validation."""
+    try:
+        file_obj.seek(0)
+    except Exception:
+        pass
     file_name = file_obj.name.lower()
     if file_name.endswith(".csv"):
         try:
@@ -679,6 +710,8 @@ def set_dataset_state(df_new: pd.DataFrame, raw_df: pd.DataFrame, steps: List[st
 
 def load_saved_progress() -> bool:
     """Load persisted raw/current datasets and history snapshots from disk."""
+    if not bool(st.session_state.get("remember", True)):
+        return False
     if not CUR_PATH.exists():
         return False
 
@@ -726,6 +759,7 @@ def reset_workspace_state() -> None:
     st.session_state.ai_last_model_name = st.session_state.ai_model_name
     st.session_state.dataset_upload_nonce = dataset_upload_nonce
     st.session_state.model_upload_nonce = model_upload_nonce
+    st.session_state.model_uploaded_sig = None
     st.session_state.persist_loaded = True
     st.session_state.uploaded_sig = None
 
@@ -779,6 +813,8 @@ def swap_axes() -> None:
 
 st.set_page_config(page_title="Data Science Project Toolkit", layout="wide")
 init_session_state()
+if not st.session_state.remember:
+    clear_saved_dataset_files()
 
 
 render_theme_bridge()
@@ -981,8 +1017,9 @@ if show_top_dropzone:
     )
     if global_drop_upload is not None:
         try:
-            handle_uploaded_dataset(global_drop_upload, source_label="dropzone")
-            st.success(f"Loaded from dropzone: {global_drop_upload.name}")
+            loaded_now = handle_uploaded_dataset(global_drop_upload, source_label="dropzone")
+            if loaded_now:
+                st.success(f"Loaded from dropzone: {global_drop_upload.name}")
         except Exception as exc:
             st.error(f"Drop upload error: {exc}")
 
@@ -1006,8 +1043,9 @@ with st.sidebar:
         )
         if uploaded_file is not None:
             try:
-                handle_uploaded_dataset(uploaded_file, source_label="sidebar")
-                st.success("Loaded ✅")
+                loaded_now = handle_uploaded_dataset(uploaded_file, source_label="sidebar")
+                if loaded_now:
+                    st.success("Loaded ✅")
             except Exception as exc:
                 st.error(f"Load error: {exc}")
         st.caption("Tip: You can also drag a file anywhere on the screen.")
@@ -1015,16 +1053,24 @@ with st.sidebar:
     with st.expander("Persistence", expanded=False):
         st.caption("Progress auto-saves after every change.")
         if st.button("Force Save Now"):
-            persist_progress()
-            st.success("Saved ✅")
+            if state.remember:
+                persist_progress()
+                st.success("Saved ✅")
+            else:
+                clear_saved_dataset_files()
+                save_state({"remember": False})
+                st.info("Remember locally is off, so no dataset is saved.")
         if st.button("Restore Last Autosave"):
-            try:
-                if load_saved_progress():
-                    st.success("Restored ✅")
-                else:
-                    st.warning("No autosave found.")
-            except Exception as exc:
-                st.error(f"Restore failed: {exc}")
+            if not state.remember:
+                st.warning("Enable Remember locally to restore autosaved datasets.")
+            else:
+                try:
+                    if load_saved_progress():
+                        st.success("Restored ✅")
+                    else:
+                        st.warning("No autosave found.")
+                except Exception as exc:
+                    st.error(f"Restore failed: {exc}")
 
         if state.raw is not None:
             if st.button("Reset to Upload"):
@@ -1055,11 +1101,25 @@ with st.sidebar:
             key=f"model_upload_{state.model_upload_nonce}",
         )
         if uploaded_model is not None:
-            try:
-                state.tk.load_model(uploaded_model)
-                st.success("Model loaded ✅")
-            except Exception as exc:
-                st.error(f"Load model failed: {exc}")
+            model_signature = uploaded_file_signature(uploaded_model)
+            if state.model_uploaded_sig != model_signature:
+                try:
+                    loaded_meta = state.tk.load_model(uploaded_model)
+                    state.model_uploaded_sig = model_signature
+
+                    target_from_model = loaded_meta.get("target") if isinstance(loaded_meta, dict) else None
+                    if isinstance(target_from_model, str):
+                        current_df = state.data
+                        if isinstance(current_df, pd.DataFrame) and target_from_model in current_df.columns:
+                            state.target = target_from_model
+                            state.target_sel = target_from_model
+                        else:
+                            st.warning(
+                                f"Model target '{target_from_model}' is not present in the current dataset."
+                            )
+                    st.success("Model loaded ✅")
+                except Exception as exc:
+                    st.error(f"Load model failed: {exc}")
 
     with st.expander("Steps log", expanded=False):
         if state.steps:
@@ -1081,6 +1141,7 @@ with st.sidebar:
     if state.remember:
         persist_progress()
     else:
+        clear_saved_dataset_files()
         save_state({"remember": False})
 
 

@@ -28,3 +28,4 @@ class DataToolkit(
         self.task_type: Optional[str] = None
         self.last_metrics: Optional[Dict[str, Any]] = None
         self.last_baseline: Optional[Dict[str, Any]] = None
+        self.last_loaded_meta: Optional[Dict[str, Any]] = None

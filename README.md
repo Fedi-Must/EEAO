@@ -5,6 +5,7 @@ clean/engineer, train models, predict, and export a report.
 
 ## Requirements
 - Python 3.9+
+- Git (optional, only for update script)
 
 Install dependencies:
 ```bash
@@ -16,15 +17,33 @@ Run:
 streamlit run app.py
 ```
 
+## Quick Start (Windows)
+- `run_app.bat`
+  - Checks Python/pip and shows install guidance if missing.
+  - Creates/uses `.venv` automatically.
+  - Installs `requirements.txt` automatically when dependencies are missing.
+  - Launches `streamlit` app.
+- `update_repo.bat`
+  - Checks Git and shows install guidance if missing.
+  - Runs safe update flow: `git fetch --prune` then `git pull --ff-only`.
+  - Explains what to do if local changes/divergence block pull.
+
 ## What It Can Do
 - Upload CSV or Excel datasets.
 - Explore data with quick filters and Plotly charts.
 - Clean data (fill missing, drop rows/columns, dedupe).
 - Engineer simple features (presence flags, outlier clipping with IQR).
 - Compare/train models with baseline metrics.
+- Use visual model tuning previews:
+  - train/test split preview for `test_size`
+  - tournament preview for cross-validation readiness
+  - hyperparameter impact charts (Random Forest, KNN, Decision Tree, Logistic)
 - Predict one row with editable feature inputs.
 - Export a `REPORT.md` summary.
 - Optional Gemini assistant in AI Help tab (API key required).
+- Local persistence now fully respects `Remember locally`:
+  - when disabled, dataset autosave files are not kept/restored
+  - autosave restore is blocked until remember mode is enabled
 
 ## Update Log (This Release)
 Major changes introduced in this modular refactor release:
@@ -56,6 +75,14 @@ Major changes introduced in this modular refactor release:
 - Removed optional local smoke script from tracked runtime files:
   - `titanic_manual_smoke.py`
 
+Additional improvements after refactor:
+- Modeling UX now includes graphical previews for split behavior and slider impact.
+- Model loading now refreshes related metadata/state more safely.
+- Stronger upload dedupe signatures reduce accidental reprocessing of same file.
+- Added Windows helper scripts:
+  - `run_app.bat`
+  - `update_repo.bat`
+
 ## Future Roadmap
 - Add project-level pipeline presets (save/load full cleaning+model workflow).
 - Add dataset validation profiles with severity levels and auto-fix suggestions.
@@ -70,7 +97,7 @@ Major changes introduced in this modular refactor release:
 - `clean_engineer_ui.py`
   - Clean + Engineer tab UI and action handlers.
 - `ui_model.py`
-  - Model tab UI (task detection, compare/train flows, metrics display).
+  - Model tab UI (task detection, compare/train flows, metrics display, visual tuning previews).
 - `ui_predict.py`
   - Predict tab UI (editable input selection + single-row inference).
 - `ui_report.py`
@@ -91,6 +118,10 @@ Major changes introduced in this modular refactor release:
   - Suggested visualization helpers.
 - `requirements.txt`
   - Python dependencies.
+- `run_app.bat`
+  - Windows one-click launcher with dependency fail-safes.
+- `update_repo.bat`
+  - Windows one-click updater (`fetch` + `pull --ff-only`) with guidance.
 - `README.md`
   - Project documentation.
 
@@ -99,6 +130,7 @@ Major changes introduced in this modular refactor release:
 - `.toolkit_raw.csv` (original uploaded data)
 - `.toolkit_current.csv` (working dataset)
 - `model.joblib` (saved model pipeline)
+- `.venv/` (created by `run_app.bat` when no virtual environment exists)
 
 ## Notes
 - Excel support relies on `openpyxl`.

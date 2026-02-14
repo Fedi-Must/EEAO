@@ -306,14 +306,24 @@ class ModelingMixin:
         }
         joblib.dump(payload, path)
 
-    def load_model(self, file_obj: Any) -> None:
-        """Load a previously saved model payload or raw pipeline."""
+    def load_model(self, file_obj: Any) -> Dict[str, Any]:
+        """Load a previously saved model payload or raw pipeline and return metadata."""
         payload = joblib.load(file_obj)
         if isinstance(payload, dict) and "pipeline" in payload:
             self.model_pipeline = payload["pipeline"]
             self.task_type = payload.get("task_type")
             self.last_metrics = payload.get("metrics")
             self.last_baseline = payload.get("baseline")
+            loaded_meta = payload.get("meta")
+            if not isinstance(loaded_meta, dict):
+                loaded_meta = {}
         else:
             self.model_pipeline = payload
             self.task_type = None
+            self.last_metrics = None
+            self.last_baseline = None
+            loaded_meta = {}
+
+        self.last_loaded_meta = loaded_meta
+        self.feature_importance = self._feature_importance()
+        return loaded_meta
