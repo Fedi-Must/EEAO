@@ -26,8 +26,8 @@ streamlit run app.py
 - Export a `REPORT.md` summary.
 - Optional Gemini assistant in AI Help tab (API key required).
 
-## Update Log (Compared To Current GitHub `main`)
-Compared against `origin/main` on February 14, 2026.
+## Update Log (This Release)
+Major changes introduced in this modular refactor release:
 
 - Refactored app architecture from monolithic `logic.py` into modular toolkit files:
   - `toolkit_core.py`
